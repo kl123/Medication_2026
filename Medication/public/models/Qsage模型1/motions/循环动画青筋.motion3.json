@@ -1,0 +1,30 @@
+{
+	"Version": 3,
+	"Meta": {
+		"Duration": 0.933,
+		"Fps": 120.0,
+		"Loop": true,
+		"AreBeziersRestricted": true,
+		"CurveCount": 1,
+		"TotalSegmentCount": 2,
+		"TotalPointCount": 3,
+		"UserDataCount": 0,
+		"TotalUserDataSize": 0
+	},
+	"Curves": [
+		{
+			"Target": "Parameter",
+			"Id": "ParamCheek15",
+			"Segments": [
+				0,
+				0,
+				0,
+				0.908,
+				1.998,
+				0,
+				0.933,
+				1
+			]
+		}
+	]
+}

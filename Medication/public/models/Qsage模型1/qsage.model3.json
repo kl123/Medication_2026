@@ -1,0 +1,28 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "Qsage.moc3",
+		"Textures": [
+			"Qsage.4096/texture_00.png",
+			"Qsage.4096/texture_01.png",
+			"Qsage.4096/texture_02.png"
+		],
+		"Physics": "Qsage.physics3.json",
+		"DisplayInfo": "Qsage.cdi3.json"
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	]
+}
