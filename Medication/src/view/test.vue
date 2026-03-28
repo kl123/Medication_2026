@@ -2,15 +2,69 @@
   <div class="app">
     <div class="content">
       <h1>欢迎使用 Qsage 模型</h1>
-      <p>点击模型会有交互效果哦~</p>
+      <p>点击模型会有交互效果，上传音频文件驱动口型同步</p>
       <div class="button-group">
         <button @click="changeModelScale">调整模型大小</button>
         <button @click="resetModelScale">重置大小</button>
         <button @click="playRandomMotion">播放随机动作</button>
+        <button @click="toggleAudioDriven" :class="{ active: isAudioDrivenEnabled }">
+          {{ isAudioDrivenEnabled ? '关闭音频驱动' : '开启音频驱动' }}
+        </button>
       </div>
       <div class="status" v-if="modelStatus">
         {{ modelStatus }}
       </div>
+      
+      <!-- 音频文件控制区 -->
+      <div class="audio-controls" v-if="isAudioDrivenEnabled">
+        <div class="audio-file-section">
+          <label for="audioFile" class="file-label">
+            📁 选择音频文件
+          </label>
+          <input 
+            type="file" 
+            id="audioFile" 
+            accept="audio/*" 
+            @change="handleAudioFileSelect"
+            :disabled="isAudioPlaying"
+            class="file-input"
+          />
+          <div class="file-info" v-if="selectedFileName">
+            <span>当前文件: {{ selectedFileName }}</span>
+            <button @click="clearAudioFile" class="clear-btn" v-if="!isAudioPlaying">清除</button>
+          </div>
+        </div>
+        
+        <div class="audio-player" v-if="audioUrl">
+          <audio 
+            ref="audioPlayer" 
+            controls 
+            @play="onAudioPlay"
+            @pause="onAudioPause"
+            @ended="onAudioEnded"
+            @timeupdate="onTimeUpdate"
+            class="audio-player-element"
+          >
+            <source :src="audioUrl" type="audio/mpeg" />
+            您的浏览器不支持音频播放
+          </audio>
+          
+          <div class="audio-visual">
+            <div class="volume-meter">
+              <div class="meter-bar" :style="{ width: volumeLevel + '%' }"></div>
+              <span class="meter-value">音量: {{ Math.floor(volumeLevel) }}%</span>
+            </div>
+            <div class="waveform" v-if="isAudioPlaying">
+              <div class="wave-bar" v-for="i in 20" :key="i" :style="{ height: getWaveHeight(i) + 'px' }"></div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="audio-note">
+          <small>💡 提示：播放音频时模型嘴巴会跟随音量变化</small>
+        </div>
+      </div>
+      
       <div class="debug-info" v-if="debugInfo">
         <details>
           <summary>调试信息</summary>
@@ -36,7 +90,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import * as PIXI from 'pixi.js'
-// 使用 Cubism 4 版本的导入
 import { Live2DModel } from 'pixi-live2d-display/cubism4'
 
 // 挂载 Pixi 到全局
@@ -49,6 +102,11 @@ const loading = ref(true)
 const error = ref('')
 const modelStatus = ref('')
 const debugInfo = ref('')
+const isAudioDrivenEnabled = ref(false)
+const isAudioPlaying = ref(false)
+const volumeLevel = ref(0)
+const selectedFileName = ref('')
+const audioUrl = ref('')
 
 // 模型配置
 const modelPath = '/models/Qsage模型1/qsage.model3.json'
@@ -56,6 +114,14 @@ let app = null
 let model = null
 let currentScale = 0.3
 let isAnimating = false
+
+// 音频相关变量
+let audioContext = null
+let audioElement = null
+let sourceNode = null
+let analyserNode = null
+let animationFrameId = null
+let originalMouthOpen = null // 保存原始口型参数
 
 // 初始化 Pixi 应用
 const initPixiApp = () => {
@@ -150,6 +216,29 @@ const loadModel = async () => {
     model.on('pointerdown', onModelClick)
     model.on('pointerenter', onModelHover)
     model.on('pointerleave', onModelLeave)
+
+    // 保存原始口型参数（如果有的话）
+    if (model.internalModel && model.internalModel.coreModel) {
+      // 尝试获取口型相关的参数ID
+      try {
+        // 常见的口型参数名称
+        const mouthParamNames = ['ParamMouthForm','ParamMouthOpenY','ParamMouthOpen']
+        for (const paramName of mouthParamNames) {
+          const paramId = model.internalModel.coreModel.getParameterIndex(paramName)
+          if (paramId !== -1) {
+            originalMouthOpen = {
+              id: paramId,
+              name: paramName,
+              defaultValue: model.internalModel.coreModel.getParameterValue(paramId)
+            }
+            debugInfo.value += `✓ 找到口型参数: ${paramName}\n`
+            break
+          }
+        }
+      } catch (e) {
+        debugInfo.value += `⚠ 未找到口型参数: ${e.message}\n`
+      }
+    }
 
     loading.value = false
     modelStatus.value = '✓ 模型加载成功！点击模型试试看~'
@@ -284,6 +373,368 @@ const playRandomMotion = () => {
   }
 }
 
+// ========== 音频文件驱动口型同步功能 ==========
+
+// 设置口型参数值
+const setMouthOpen = (value) => {
+  if (!model || !model.internalModel || !model.internalModel.coreModel) return
+  
+  // 限制值范围 0-1
+  const clampedValue = Math.min(1, Math.max(0, value))
+  
+  if (originalMouthOpen) {
+    // 使用找到的口型参数
+    try {
+      model.internalModel.coreModel.setParameterValue(originalMouthOpen.id, clampedValue)
+    } catch (e) {
+      // 参数设置失败
+    }
+  } else {
+    // 尝试常见参数名称
+    const paramNames = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamMouthOpen']
+    for (const paramName of paramNames) {
+      try {
+        const paramId = model.internalModel.coreModel.getParameterIndex(paramName)
+        if (paramId !== -1) {
+          model.internalModel.coreModel.setParameterValue(paramId, clampedValue)
+          break
+        }
+      } catch (e) {
+        // 继续尝试下一个
+      }
+    }
+  }
+}
+
+// 重置口型到默认值
+const resetMouthOpen = () => {
+  if (!model || !model.internalModel || !model.internalModel.coreModel) return
+  
+  if (originalMouthOpen) {
+    try {
+      model.internalModel.coreModel.setParameterValue(originalMouthOpen.id, originalMouthOpen.defaultValue || 0)
+    } catch (e) {}
+  } else {
+    const paramNames = ['ParamMouthOpenY', 'ParamMouthForm', 'ParamMouthOpen']
+    for (const paramName of paramNames) {
+      try {
+        const paramId = model.internalModel.coreModel.getParameterIndex(paramName)
+        if (paramId !== -1) {
+          model.internalModel.coreModel.setParameterValue(paramId, 0)
+          break
+        }
+      } catch (e) {}
+    }
+  }
+}
+
+// 根据音频振幅更新口型
+const updateMouthByVolume = () => {
+  if (!isAudioDrivenEnabled.value || !isAudioPlaying.value || !analyserNode || !model) {
+    if (animationFrameId) {
+      cancelAnimationFrame(animationFrameId)
+      animationFrameId = null
+    }
+    return
+  }
+  
+  // 获取音频数据
+  const dataArray = new Uint8Array(analyserNode.frequencyBinCount)
+  analyserNode.getByteFrequencyData(dataArray)
+  
+  // 计算平均音量
+  let sum = 0
+  for (let i = 0; i < dataArray.length; i++) {
+    sum += dataArray[i]
+  }
+  let avg = sum / dataArray.length
+  // 将音量映射到 0-1 范围，设置灵敏度和阈值
+  let volume = Math.min(1, Math.max(0, (avg - 10) / 200))
+  
+  // 平滑处理，避免口型抖动
+  volumeLevel.value = volume * 100
+  // 口型开度跟随音量变化，最低保持0.05避免完全闭合
+  const mouthOpenValue = 0.05 + volume * 0.95
+  
+  // 设置模型口型参数
+  setMouthOpen(mouthOpenValue)
+  
+  // 继续循环
+  animationFrameId = requestAnimationFrame(updateMouthByVolume)
+}
+
+// 处理音频文件选择
+const handleAudioFileSelect = (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+  
+  // 检查文件类型
+  if (!file.type.startsWith('audio/')) {
+    modelStatus.value = '请选择有效的音频文件'
+    setTimeout(() => {
+      if (modelStatus.value === '请选择有效的音频文件') {
+        modelStatus.value = ''
+      }
+    }, 2000)
+    return
+  }
+  
+  // 清理之前的音频
+  cleanupAudio()
+  
+  selectedFileName.value = file.name
+  
+  // 创建音频URL
+  if (audioUrl.value) {
+    URL.revokeObjectURL(audioUrl.value)
+  }
+  audioUrl.value = URL.createObjectURL(file)
+  
+  modelStatus.value = `已加载音频: ${file.name}`
+  debugInfo.value += `✓ 音频文件已加载: ${file.name}\n`
+  
+  setTimeout(() => {
+    if (modelStatus.value === `已加载音频: ${file.name}`) {
+      modelStatus.value = ''
+    }
+  }, 2000)
+}
+
+// 清除音频文件
+const clearAudioFile = () => {
+  if (isAudioPlaying.value) {
+    stopAudioPlayback()
+  }
+  
+  if (audioUrl.value) {
+    URL.revokeObjectURL(audioUrl.value)
+    audioUrl.value = ''
+  }
+  
+  selectedFileName.value = ''
+  
+  // 重置音量显示
+  volumeLevel.value = 0
+  resetMouthOpen()
+  
+  modelStatus.value = '已清除音频文件'
+  debugInfo.value += '✓ 音频文件已清除\n'
+  
+  setTimeout(() => {
+    if (modelStatus.value === '已清除音频文件') {
+      modelStatus.value = ''
+    }
+  }, 2000)
+}
+
+// 初始化音频分析器
+const initAudioAnalyzer = () => {
+  if (!audioElement) return
+  
+  try {
+    // 创建 AudioContext
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)()
+    }
+    
+    // 创建音频源节点
+    sourceNode = audioContext.createMediaElementSource(audioElement)
+    analyserNode = audioContext.createAnalyser()
+    analyserNode.fftSize = 256
+    
+    // 连接节点
+    sourceNode.connect(analyserNode)
+    analyserNode.connect(audioContext.destination)
+    
+    debugInfo.value += '✓ 音频分析器初始化成功\n'
+    
+  } catch (err) {
+    console.error('音频分析器初始化失败:', err)
+    modelStatus.value = '音频分析器初始化失败: ' + err.message
+    debugInfo.value += `✗ 音频分析器初始化失败: ${err.message}\n`
+  }
+}
+
+// 音频播放事件
+const onAudioPlay = async () => {
+  if (!isAudioDrivenEnabled.value) return
+  
+  try {
+    // 启动 AudioContext
+    if (audioContext && audioContext.state === 'suspended') {
+      await audioContext.resume()
+    }
+    
+    isAudioPlaying.value = true
+    modelStatus.value = '音频播放中，模型嘴巴跟随音乐...'
+    
+    // 初始化分析器（如果还没有）
+    if (!analyserNode && audioElement) {
+      initAudioAnalyzer()
+    }
+    
+    // 开始口型同步循环
+    if (animationFrameId) {
+      cancelAnimationFrame(animationFrameId)
+    }
+    animationFrameId = requestAnimationFrame(updateMouthByVolume)
+    
+    debugInfo.value += '▶ 音频开始播放\n'
+    
+  } catch (err) {
+    console.error('音频播放失败:', err)
+    modelStatus.value = '音频播放失败: ' + err.message
+    isAudioPlaying.value = false
+  }
+}
+
+// 音频暂停事件
+const onAudioPause = () => {
+  isAudioPlaying.value = false
+  modelStatus.value = '音频已暂停'
+  
+  // 重置口型
+  resetMouthOpen()
+  volumeLevel.value = 0
+  
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
+  
+  debugInfo.value += '⏸ 音频已暂停\n'
+  
+  setTimeout(() => {
+    if (modelStatus.value === '音频已暂停') {
+      modelStatus.value = ''
+    }
+  }, 2000)
+}
+
+// 音频播放结束事件
+const onAudioEnded = () => {
+  isAudioPlaying.value = false
+  modelStatus.value = '音频播放结束'
+  
+  // 重置口型
+  resetMouthOpen()
+  volumeLevel.value = 0
+  
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
+  
+  debugInfo.value += '■ 音频播放结束\n'
+  
+  setTimeout(() => {
+    if (modelStatus.value === '音频播放结束') {
+      modelStatus.value = ''
+    }
+  }, 2000)
+}
+
+// 时间更新事件（用于获取播放进度）
+const onTimeUpdate = () => {
+  if (!audioElement) return
+  // 可以在这里添加进度条等功能
+}
+
+// 停止音频播放
+const stopAudioPlayback = () => {
+  if (audioElement && !audioElement.paused) {
+    audioElement.pause()
+    audioElement.currentTime = 0
+  }
+  isAudioPlaying.value = false
+  volumeLevel.value = 0
+  resetMouthOpen()
+  
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
+}
+
+// 获取波形高度（用于视觉反馈）
+const getWaveHeight = (index) => {
+  if (!isAudioPlaying.value || !analyserNode) return 5
+  
+  const dataArray = new Uint8Array(analyserNode.frequencyBinCount)
+  analyserNode.getByteFrequencyData(dataArray)
+  
+  // 根据索引获取对应频率的振幅
+  const step = Math.floor(dataArray.length / 20)
+  const value = dataArray[index * step] || 0
+  // 映射到 5-30px
+  return 5 + (value / 255) * 25
+}
+
+// 清理音频资源
+const cleanupAudio = () => {
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
+  
+  if (sourceNode) {
+    try {
+      sourceNode.disconnect()
+    } catch (e) {}
+    sourceNode = null
+  }
+  
+  if (analyserNode) {
+    try {
+      analyserNode.disconnect()
+    } catch (e) {}
+    analyserNode = null
+  }
+  
+  // 停止音频播放
+  if (audioElement) {
+    if (!audioElement.paused) {
+      audioElement.pause()
+    }
+    audioElement.src = ''
+  }
+  
+  isAudioPlaying.value = false
+  volumeLevel.value = 0
+  
+  // 重置口型
+  if (model) {
+    resetMouthOpen()
+  }
+}
+
+// 切换音频驱动模式
+const toggleAudioDriven = () => {
+  isAudioDrivenEnabled.value = !isAudioDrivenEnabled.value
+  
+  if (!isAudioDrivenEnabled.value) {
+    // 关闭音频驱动，停止音频播放
+    if (isAudioPlaying.value) {
+      stopAudioPlayback()
+    }
+    modelStatus.value = '音频驱动已关闭'
+    debugInfo.value += '音频驱动模式已关闭\n'
+    
+    // 重置口型
+    resetMouthOpen()
+    volumeLevel.value = 0
+  } else {
+    modelStatus.value = '音频驱动已开启，请选择音频文件'
+    debugInfo.value += '音频驱动模式已开启\n'
+  }
+  
+  setTimeout(() => {
+    if (modelStatus.value === '音频驱动已关闭' || modelStatus.value === '音频驱动已开启，请选择音频文件') {
+      modelStatus.value = ''
+    }
+  }, 2000)
+}
+
 // 调整画布尺寸
 const resizeCanvas = () => {
   if (!app || !containerRef.value) return
@@ -314,6 +765,9 @@ onMounted(async () => {
     await loadModel()
     window.addEventListener('resize', resizeCanvas)
     resizeCanvas()
+    
+    // 获取 audio 元素引用
+    audioElement = document.querySelector('audio')
   } else {
     error.value = 'Pixi 应用初始化失败，请检查控制台'
     loading.value = false
@@ -322,6 +776,18 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', resizeCanvas)
+  
+  // 清理音频资源
+  cleanupAudio()
+  
+  if (audioUrl.value) {
+    URL.revokeObjectURL(audioUrl.value)
+  }
+  
+  if (audioContext) {
+    audioContext.close().catch(console.warn)
+  }
+  
   if (model) {
     model.off('pointerdown', onModelClick)
     model.off('pointerenter', onModelHover)
@@ -358,7 +824,7 @@ onUnmounted(() => {
   color: white;
   z-index: 10;
   pointer-events: none;
-  max-width: 400px;
+  max-width: 450px;
 }
 
 .content h1 {
@@ -400,6 +866,11 @@ onUnmounted(() => {
   transform: translateY(-1px);
 }
 
+.content button.active {
+  background: rgba(76, 175, 80, 0.5);
+  border: 1px solid #4caf50;
+}
+
 .status {
   margin-top: 10px;
   padding: 6px 12px;
@@ -410,13 +881,129 @@ onUnmounted(() => {
   backdrop-filter: blur(5px);
 }
 
+.audio-controls {
+  margin-top: 15px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 8px;
+  backdrop-filter: blur(5px);
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+.audio-file-section {
+  margin-bottom: 12px;
+}
+
+.file-label {
+  display: inline-block;
+  padding: 6px 12px;
+  background: rgba(33, 150, 243, 0.8);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.3s;
+}
+
+.file-label:hover {
+  background: rgba(33, 150, 243, 1);
+  transform: translateY(-1px);
+}
+
+.file-input {
+  display: none;
+}
+
+.file-info {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+.clear-btn {
+  background: rgba(244, 67, 54, 0.8) !important;
+  padding: 2px 8px !important;
+  font-size: 10px !important;
+}
+
+.audio-player {
+  margin-top: 10px;
+}
+
+.audio-player-element {
+  width: 100%;
+  height: 36px;
+  margin-bottom: 10px;
+  border-radius: 18px;
+}
+
+.audio-visual {
+  margin-top: 8px;
+}
+
+.volume-meter {
+  width: 100%;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 8px;
+  position: relative;
+}
+
+.meter-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #4caf50, #ffeb3b, #f44336);
+  width: 0%;
+  transition: width 0.05s linear;
+  border-radius: 10px;
+}
+
+.meter-value {
+  position: absolute;
+  right: 8px;
+  top: 2px;
+  font-size: 10px;
+  color: white;
+  text-shadow: 0 0 2px black;
+}
+
+.waveform {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+}
+
+.wave-bar {
+  flex: 1;
+  background: linear-gradient(180deg, #4caf50, #2196f3);
+  border-radius: 2px;
+  transition: height 0.05s linear;
+  min-height: 5px;
+  max-height: 40px;
+}
+
+.audio-note {
+  font-size: 10px;
+  opacity: 0.8;
+  margin-top: 8px;
+  text-align: center;
+}
+
 .debug-info {
   margin-top: 15px;
   background: rgba(0, 0, 0, 0.8);
   border-radius: 6px;
   padding: 8px;
   font-size: 10px;
-  max-width: 350px;
+  max-width: 400px;
   max-height: 200px;
   overflow: auto;
 }
@@ -510,7 +1097,7 @@ onUnmounted(() => {
   .content {
     top: 10px;
     left: 10px;
-    max-width: 300px;
+    max-width: 320px;
   }
   
   .content h1 {
@@ -522,6 +1109,10 @@ onUnmounted(() => {
     height: 50%;
     bottom: 0;
     right: 0;
+  }
+  
+  .audio-controls {
+    max-width: 300px;
   }
 }
 </style>
